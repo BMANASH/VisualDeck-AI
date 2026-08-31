@@ -1,5 +1,5 @@
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import json
 import time
@@ -9,7 +9,6 @@ from google.genai import types
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
 # 1. Page Configuration
@@ -115,20 +114,13 @@ st.markdown("""
         color: #00D2FF;
         margin-left: 6px;
     }
-    .slide-preview-card {
-        background: rgba(16, 24, 38, 0.75);
-        border: 1px solid rgba(0, 210, 255, 0.25);
-        border-radius: 12px;
-        padding: 18px;
-        margin-bottom: 16px;
-    }
 </style>
 """, unsafe_allow_html=True)
 
-# 3. Helper Functions: Colors & PowerPoint Engine
+# 3. PowerPoint Generator Engine (16:9 Widescreen)
 def hex_to_rgb(hex_code, default_hex="00D2FF"):
     try:
-        clean_hex = hex_code.lstrip('#')
+        clean_hex = str(hex_code).lstrip('#')
         if len(clean_hex) != 6:
             clean_hex = default_hex.lstrip('#')
         return RGBColor(*(int(clean_hex[i:i+2], 16) for i in (0, 2, 4)))
@@ -137,6 +129,7 @@ def hex_to_rgb(hex_code, default_hex="00D2FF"):
 
 def build_powerpoint(deck_data):
     prs = Presentation()
+    # Standard 16:9 Widescreen dimensions
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
     blank_layout = prs.slide_layouts[6]
@@ -157,34 +150,34 @@ def build_powerpoint(deck_data):
         bg_shape.fill.fore_color.rgb = bg_color
         bg_shape.line.color.rgb = bg_color
 
-        # 2. Slide Header Title
-        title_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.7), Inches(1.0))
+        # 2. Slide Header Title & Subtitle
+        title_box = slide.shapes.add_textbox(Inches(0.8), Inches(0.5), Inches(11.7), Inches(1.1))
         tf = title_box.text_frame
         tf.word_wrap = True
         p = tf.paragraphs[0]
         p.text = slide_info.get("title", "Executive Overview")
-        p.font.size = Pt(26)
+        p.font.size = Pt(24)
         p.font.bold = True
         p.font.color.rgb = primary_color
 
         if slide_info.get("subtitle"):
             p_sub = tf.add_paragraph()
             p_sub.text = slide_info.get("subtitle")
-            p_sub.font.size = Pt(14)
+            p_sub.font.size = Pt(13)
             p_sub.font.color.rgb = secondary_text
 
         layout = slide_info.get("layout_type", "cards")
 
-        # 3. Layout Type A: KPI Metric Cards
+        # 3. Dynamic Layout: KPI Metric Cards
         if layout == "kpi_grid" and slide_info.get("kpis"):
             kpis = slide_info["kpis"]
-            card_width = Inches(3.6)
+            card_count = min(len(kpis), 3)
+            card_width = Inches(11.7 / card_count - 0.3)
             card_height = Inches(4.2)
-            for idx, kpi in enumerate(kpis[:3]):
-                left = Inches(0.8 + idx * 4.0)
+            for idx, kpi in enumerate(kpis[:card_count]):
+                left = Inches(0.8 + idx * (11.7 / card_count))
                 top = Inches(1.8)
                 
-                # Card Background Shape
                 c_shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, card_width, card_height)
                 c_shape.fill.solid()
                 c_shape.fill.fore_color.rgb = card_color
@@ -195,24 +188,24 @@ def build_powerpoint(deck_data):
                 c_tf.word_wrap = True
                 
                 p_val = c_tf.paragraphs[0]
-                p_val.text = kpi.get("value", "")
-                p_val.font.size = Pt(32)
+                p_val.text = str(kpi.get("value", ""))
+                p_val.font.size = Pt(28)
                 p_val.font.bold = True
                 p_val.font.color.rgb = primary_color
                 
                 p_lbl = c_tf.add_paragraph()
-                p_lbl.text = kpi.get("label", "")
+                p_lbl.text = str(kpi.get("label", ""))
                 p_lbl.font.size = Pt(14)
                 p_lbl.font.bold = True
                 p_lbl.font.color.rgb = text_color
                 
                 if kpi.get("desc"):
                     p_desc = c_tf.add_paragraph()
-                    p_desc.text = kpi.get("desc")
+                    p_desc.text = str(kpi.get("desc"))
                     p_desc.font.size = Pt(11)
                     p_desc.font.color.rgb = secondary_text
 
-        # 4. Layout Type B: Native Data Table
+        # 4. Dynamic Layout: Native PowerPoint Table
         elif layout == "table" and slide_info.get("table"):
             table_data = slide_info["table"]
             headers = table_data.get("headers", [])
@@ -230,7 +223,7 @@ def build_powerpoint(deck_data):
                     cell.fill.solid()
                     cell.fill.fore_color.rgb = card_color
                     for p in cell.text_frame.paragraphs:
-                        p.font.size = Pt(13)
+                        p.font.size = Pt(12)
                         p.font.bold = True
                         p.font.color.rgb = primary_color
                 
@@ -244,7 +237,7 @@ def build_powerpoint(deck_data):
                             p.font.size = Pt(11)
                             p.font.color.rgb = text_color
 
-        # 5. Layout Type C: Structured Bullet Cards
+        # 5. Dynamic Layout: Visual Cards & Highlight Bullets
         else:
             bullets = slide_info.get("bullets", [])
             card_shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.8), Inches(1.8), Inches(11.7), Inches(4.8))
@@ -259,9 +252,9 @@ def build_powerpoint(deck_data):
             for b_idx, bullet in enumerate(bullets):
                 p = b_tf.paragraphs[0] if b_idx == 0 else b_tf.add_paragraph()
                 p.text = f"• {bullet}"
-                p.font.size = Pt(14)
+                p.font.size = Pt(13)
                 p.font.color.rgb = text_color
-                p.space_after = Pt(12)
+                p.space_after = Pt(10)
 
     output_stream = io.BytesIO()
     prs.save(output_stream)
@@ -277,15 +270,15 @@ with st.sidebar:
     
     st.markdown("""
     <div class="sidebar-kpi">
-        <div class="sidebar-kpi-title">Core AI Engine</div>
-        <div class="sidebar-kpi-val" style="color:#00D2FF;">Gemini 3 Flash (Vision)</div>
+        <div class="sidebar-kpi-title">Core AI Architecture</div>
+        <div class="sidebar-kpi-val" style="color:#00D2FF;">Gemini 3 Series</div>
     </div>
     <div class="sidebar-kpi">
-        <div class="sidebar-kpi-title">Export Format</div>
-        <div class="sidebar-kpi-val">Editable Microsoft .PPTX</div>
+        <div class="sidebar-kpi-title">Presentation Format</div>
+        <div class="sidebar-kpi-val">16:9 Widescreen .PPTX</div>
     </div>
     <div class="sidebar-kpi">
-        <div class="sidebar-kpi-title">Extraction Fidelity</div>
+        <div class="sidebar-kpi-title">Visual Extraction</div>
         <div class="sidebar-kpi-val" style="color:#10B981;">Shapes, Tables & Colors</div>
     </div>
     """, unsafe_allow_html=True)
@@ -294,9 +287,9 @@ with st.sidebar:
     st.markdown("### 📋 How It Works")
     st.markdown("""
     <div style="font-size:0.82rem; color:#94A3B8; line-height:1.6;">
-        <b style="color:#FFF;">1. Ingest:</b> Upload product sheets, diagrams, tables, or PDF files.<br>
-        <b style="color:#FFF;">2. Analyze:</b> AI scans visual hierarchy, tables, and brand palettes.<br>
-        <b style="color:#FFF;">3. Build:</b> Generates a native editable PowerPoint presentation.
+        <b style="color:#FFF;">1. Ingestion:</b> Upload photos, brochures, diagrams, or PDF files.<br>
+        <b style="color:#FFF;">2. Analysis:</b> AI understands visual hierarchy, tables, and brand palettes.<br>
+        <b style="color:#FFF;">3. Generation:</b> Outputs an editable native PowerPoint deck.
     </div>
     """, unsafe_allow_html=True)
 
@@ -312,18 +305,26 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-# Parse file data for KPI stats
 image_count = 0
 pdf_page_count = 0
 total_size_mb = 0.0
-loaded_images = []
+raw_image_parts = []
+original_images = []
 
 if uploaded_files:
     total_size_mb = sum([f.size for f in uploaded_files]) / (1024 * 1024)
     for f in uploaded_files:
         if f.type.startswith("image/"):
             image_count += 1
-            loaded_images.append(Image.open(f))
+            img = Image.open(f)
+            original_images.append((f.name, img))
+            
+            # Prepare JPEG bytes for Gemini SDK
+            buf = io.BytesIO()
+            img.convert('RGB').save(buf, format='JPEG', quality=85)
+            part = types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg")
+            raw_image_parts.append(part)
+
         elif f.type == "application/pdf":
             try:
                 reader = PdfReader(io.BytesIO(f.getvalue()))
@@ -334,7 +335,7 @@ if uploaded_files:
 # 7. Top KPI Summary Cards
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.markdown("""<div class="kpi-card"><div class="kpi-title">Vision Model</div><div class="kpi-value">Gemini 3 Flash</div><div class="kpi-desc">Fast Visual Pipeline</div></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="kpi-card"><div class="kpi-title">AI Engine</div><div class="kpi-value">Gemini 3 Series</div><div class="kpi-desc">Multimodal Vision Pipeline</div></div>""", unsafe_allow_html=True)
 with col2:
     val_str = f"{len(uploaded_files)} Items" if uploaded_files else "0 Files"
     desc_str = f"{image_count} Img | {pdf_page_count} PDF Pages" if pdf_page_count > 0 else f"{image_count} Images Loaded"
@@ -342,27 +343,23 @@ with col2:
 with col3:
     st.markdown(f"""<div class="kpi-card"><div class="kpi-title">Buffer Size</div><div class="kpi-value">{total_size_mb:.2f} MB</div><div class="kpi-desc">Ready for Synthesis</div></div>""", unsafe_allow_html=True)
 with col4:
-    st.markdown("""<div class="kpi-card"><div class="kpi-title">Export Standard</div><div class="kpi-value">Native .PPTX</div><div class="kpi-desc">Editable Shapes & Data</div></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="kpi-card"><div class="kpi-title">Export Standard</div><div class="kpi-value">16:9 .PPTX</div><div class="kpi-desc">Editable Shapes & Data</div></div>""", unsafe_allow_html=True)
 
 st.markdown("---")
 
-# 8. Uploaded Assets Gallery (Compact Preview Grid)
+# 8. Uploaded Assets Gallery (Compact 16:9 Thumbnail Cards with Pillow)
 if uploaded_files:
     st.markdown(f"#### 📑 Source Assets Ready for Analysis ({len(uploaded_files)})")
     cols = st.columns(min(len(uploaded_files), 4))
-    for idx, file in enumerate(uploaded_files):
+    for idx, (fname, img) in enumerate(original_images):
         with cols[idx % 4]:
             with st.container(border=True):
-                st.caption(f"**Asset {idx + 1}:** `{file.name[:18]}...`")
-                if file.type.startswith("image/"):
-                    img = Image.open(file)
-                    thumb = img.copy()
-                    thumb.thumbnail((260, 120))
-                    st.image(thumb, use_container_width=True)
-                    with st.expander("🔍 View Full Image"):
-                        st.image(img, use_container_width=True)
-                elif file.type == "application/pdf":
-                    st.info(f"📄 PDF Document\n\nPages: {pdf_page_count}\nSize: {round(file.size / 1024, 1)} KB")
+                st.caption(f"**Asset {idx + 1}:** `{fname[:18]}...`")
+                # Create uniform cropped 16:9 thumbnail
+                thumb = ImageOps.fit(img.convert('RGB'), (260, 130), Image.Resampling.LANCZOS)
+                st.image(thumb)
+                with st.expander("🔍 View Full Image"):
+                    st.image(img)
 
     st.markdown("---")
 
@@ -389,29 +386,32 @@ if uploaded_files:
             )
 
     # 10. AI Generation Engine Execution
-    generate_clicked = st.button("⚡ Generate AI Presentation Deck", type="primary", use_container_width=True)
+    generate_clicked = st.button("⚡ Generate AI Presentation Deck", type="primary")
 
     if generate_clicked:
         api_key = st.secrets.get("GEMINI_API_KEY")
         if not api_key:
             st.error("⚠️ Gemini API Key not found in Streamlit Secrets. Please configure `GEMINI_API_KEY`.")
-        elif not loaded_images:
+        elif not raw_image_parts:
             st.warning("Please upload at least one image to synthesize slides.")
         else:
             start_time = time.time()
-            with st.status("🚀 Processing with Gemini 3 Vision Engine...", expanded=True) as status:
-                st.write("🔍 **Phase 1:** Scanning visual layout, tables, and specifications...")
+            with st.status("🚀 Synthesizing Deck with Gemini 3 Engine...", expanded=True) as status:
+                st.write("🔍 **Phase 1:** Reading visual layout, tables, certifications, and product details...")
                 
-                # Setup Gemini Client
                 client = genai.Client(api_key=api_key)
                 
-                # Structured Presentation Prompt
                 prompt = f"""
-                You are an expert executive presentation designer. Analyze these uploaded source images carefully.
-                Extract key data, specifications, tables, pricing, and visual themes.
-                Generate a {slide_count}-slide presentation outline matching this audience tone: '{presentation_tone}'.
+                You are an autonomous presentation architect and visual designer.
+                Analyze the attached source images carefully.
                 
-                Output ONLY a valid JSON object matching this exact schema:
+                Key Guidelines:
+                1. DYNAMIC ARCHITECTURE: Do NOT force a rigid generic slide list. Understand the true topic, content, and data flow of the uploaded materials and structure a natural {slide_count}-slide presentation.
+                2. DATA EXTRACTION + EXECUTIVE PRESENTATION: Extract exact numbers, models, certifications, pricing, and specs faithfully. Present them using high-impact visual formats (KPI cards, native comparison tables, concise bullet points) rather than dense walls of text.
+                3. COLOR EXTRACTION: Extract the authentic brand color palette from the logos and graphics in the images (background, primary accent, card surface, and contrast text colors).
+                4. Match this audience tone: '{presentation_tone}'.
+                
+                Return a JSON object conforming strictly to this structure:
                 {{
                   "theme": {{
                     "background_hex": "#0A0E17",
@@ -425,82 +425,87 @@ if uploaded_files:
                     {{
                       "slide_number": 1,
                       "layout_type": "kpi_grid",
-                      "title": "Executive Summary & Core Metrics",
-                      "subtitle": "High-level overview",
+                      "title": "Slide Title",
+                      "subtitle": "Subtitle or core insight",
                       "kpis": [
-                        {{"label": "Key Metric", "value": "Value", "desc": "Brief note"}}
+                        {{"label": "Metric Name", "value": "Extracted Value", "desc": "Context note"}}
                       ]
                     }},
                     {{
                       "slide_number": 2,
                       "layout_type": "table",
-                      "title": "Specifications & Pricing Breakdown",
-                      "subtitle": "Detailed comparison",
+                      "title": "Model Comparison & Specifications",
+                      "subtitle": "Detailed breakdown",
                       "table": {{
-                        "headers": ["Item / Model", "Capacity / Spec", "Investment / Price"],
+                        "headers": ["Model / Item", "Capacity / Spec", "Investment / Price"],
                         "rows": [
-                          ["Model A", "Specs", "Price"],
-                          ["Model B", "Specs", "Price"]
+                          ["Model A", "2000L", "₹7,49,300/-"]
                         ]
                       }}
                     }},
                     {{
                       "slide_number": 3,
-                      "layout_type": "bullets",
-                      "title": "Strategic Advantages & Value Proposition",
-                      "subtitle": "Key highlights",
+                      "layout_type": "cards",
+                      "title": "Key Advantages & Features",
+                      "subtitle": "Value summary",
                       "bullets": [
-                        "Highlight point 1 extracted from materials",
-                        "Highlight point 2 extracted from materials",
-                        "Highlight point 3 extracted from materials"
+                        "Clear bullet point 1",
+                        "Clear bullet point 2"
                       ]
                     }}
                   ]
                 }}
-                Do not include markdown backticks or any conversational text. Return only the raw JSON.
                 """
 
-                # Call Gemini Vision with model fallback
+                # Gemini 3 Series Models Priority
+                gemini_3_models = [
+                    'gemini-3.1-flash-lite',
+                    'gemini-3.5-flash-lite',
+                    'gemini-3.7-flash',
+                    'gemini-3.5-flash'
+                ]
+                
                 response_json = None
-                models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']
-                for m in models_to_try:
+                last_error = None
+                
+                for model_name in gemini_3_models:
                     try:
-                        content_payload = [prompt] + loaded_images[:5]
+                        content_payload = [prompt] + raw_image_parts[:5]
                         res = client.models.generate_content(
-                            model=m,
-                            contents=content_payload
+                            model=model_name,
+                            contents=content_payload,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json"
+                            )
                         )
                         raw_text = res.text.strip()
-                        if raw_text.startswith("```json"):
-                            raw_text = raw_text[7:-3].strip()
-                        elif raw_text.startswith("```"):
-                            raw_text = raw_text[3:-3].strip()
                         response_json = json.loads(raw_text)
                         break
-                    except Exception:
+                    except Exception as e:
+                        last_error = str(e)
                         continue
 
                 if not response_json:
-                    status.update(label="❌ Failed to parse presentation data. Please retry.", state="error")
-                    st.error("Could not process presentation schema. Please check API quota or try with fewer images.")
+                    status.update(label="❌ Generation Encountered an Error", state="error")
+                    st.error(f"API Error Log: {last_error}")
                 else:
-                    st.write("📊 **Phase 2:** Synthesizing native PowerPoint vector shapes and slide objects...")
+                    st.write("📊 **Phase 2:** Synthesizing 16:9 native PowerPoint vector shapes and slide tables...")
                     pptx_stream = build_powerpoint(response_json)
                     st.session_state["generated_pptx"] = pptx_stream
                     st.session_state["deck_data"] = response_json
                     status.update(label="✅ Presentation Deck Synthesized Successfully!", state="complete", expanded=False)
 
-    # 11. Display Slide Preview & Download Options
+    # 11. Display Slide Preview & Direct Download Options
     if "generated_pptx" in st.session_state and "deck_data" in st.session_state:
         deck = st.session_state["deck_data"]
         slides = deck.get("slides", [])
         
         st.markdown("---")
-        st.markdown(f"### 📑 Presentation Preview: **{deck.get('deck_title', 'Synthesized Deck')}**")
+        st.markdown(f"### 📑 Synthesized Presentation: **{deck.get('deck_title', 'Synthesized Deck')}**")
         
         # Download Button
         st.download_button(
-            label="📥 Download Native .PPTX Presentation",
+            label="📥 Download Native 16:9 .PPTX Presentation",
             data=st.session_state["generated_pptx"],
             file_name="VisualDeck_AI_Presentation.pptx",
             mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -526,7 +531,7 @@ if uploaded_files:
                     if headers and rows:
                         import pandas as pd
                         df = pd.DataFrame(rows, columns=headers)
-                        st.dataframe(df, use_container_width=True)
+                        st.dataframe(df)
                 
                 elif s.get("bullets"):
                     for b in s["bullets"]:
