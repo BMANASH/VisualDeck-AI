@@ -380,10 +380,10 @@ def build_powerpoint(deck_data, source_images=None):
 
         # --- Section-break slides get a completely different, simpler treatment ---
         if layout == "section_break":
-            accent_bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(MARGIN), Inches(3.55), Inches(1.1), Inches(0.09))
+            accent_bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(MARGIN), Inches(2.68), Inches(1.1), Inches(0.09))
             accent_bar.fill.solid(); accent_bar.fill.fore_color.rgb = primary_color; accent_bar.line.fill.background()
 
-            title_box = slide.shapes.add_textbox(Inches(MARGIN), Inches(2.9), Inches(CONTENT_W), Inches(1.3))
+            title_box = slide.shapes.add_textbox(Inches(MARGIN), Inches(2.95), Inches(CONTENT_W), Inches(1.3))
             tf = title_box.text_frame; tf.word_wrap = True
             p = tf.paragraphs[0]
             p.text = slide_info.get("title", "")
@@ -459,21 +459,29 @@ def build_powerpoint(deck_data, source_images=None):
         # LAYOUT: image_full — full-bleed image with title overlay
         # =====================================================
         elif layout == "image_full" and pil_img is not None:
-            iw, ih = fit_dimensions(pil_img.width, pil_img.height, CONTENT_W, CONTENT_BOTTOM - CONTENT_TOP + 0.3)
+            has_caption = bool(slide_info.get("bullets"))
+            cap_text = ""
+            cap_h = 0.0
+            if has_caption:
+                cap_text = " · ".join([b.get("text", str(b)) if isinstance(b, dict) else str(b) for b in slide_info["bullets"][:3]])
+                cap_h = min(estimate_block_height_in(cap_text, 12, CONTENT_W - 0.6) + 0.3, 1.1)
+
+            reserved_for_caption = (cap_h + 0.2) if has_caption else 0.0
+            image_area_h = (CONTENT_BOTTOM - CONTENT_TOP) - reserved_for_caption
+            iw, ih = fit_dimensions(pil_img.width, pil_img.height, CONTENT_W, image_area_h)
             left = MARGIN + (CONTENT_W - iw) / 2
-            top = CONTENT_TOP + ((CONTENT_BOTTOM - CONTENT_TOP + 0.3) - ih) / 2
+            top = CONTENT_TOP + (image_area_h - ih) / 2
             stream = pil_to_stream(pil_img, "JPEG")
             slide.shapes.add_picture(stream, Inches(left), Inches(top), width=Inches(iw), height=Inches(ih))
 
-            if slide_info.get("bullets"):
-                cap = " · ".join([b.get("text", str(b)) if isinstance(b, dict) else str(b) for b in slide_info["bullets"][:3]])
-                cap_h = estimate_block_height_in(cap, 12, CONTENT_W - 0.6) + 0.3
-                cap_box = add_rounded_card(slide, MARGIN, top + ih - cap_h - 0.15, CONTENT_W, cap_h, card_color, primary_color, 0.75)
-                cap_box.fill.transparency = 0
+            if has_caption:
+                cap_top = CONTENT_TOP + image_area_h + 0.2
+                cap_box = add_rounded_card(slide, MARGIN, cap_top, CONTENT_W, cap_h, card_color, primary_color, 0.75)
                 ctf = cap_box.text_frame; ctf.word_wrap = True
                 ctf.margin_left = Inches(0.25); ctf.margin_top = Inches(0.12)
+                ctf.vertical_anchor = MSO_ANCHOR.MIDDLE
                 cp = ctf.paragraphs[0]
-                cp.text = cap
+                cp.text = cap_text
                 cp.font.size = Pt(12); cp.font.name = body_font; cp.font.color.rgb = text_color
 
         # =====================================================
