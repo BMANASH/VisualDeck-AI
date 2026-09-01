@@ -284,16 +284,43 @@ def safe_font(name, fallback="Calibri"):
     return fallback
 
 
-def estimate_block_height_in(text, font_size_pt, box_width_in, line_spacing=1.22, min_lines=1):
+def estimate_block_height_in(text, font_size_pt, box_width_in, line_spacing=1.22, min_lines=1, bold=False):
     """Rough text-wrapping estimate (no real font metrics available at build time).
     Used to size containers to their actual content instead of using fixed heights."""
     if not text:
         text = ""
-    avg_char_width_in = (font_size_pt * 0.52) / 72.0
+    avg_char_width_in = (font_size_pt * (0.62 if bold else 0.52)) / 72.0
     chars_per_line = max(1, int(box_width_in / avg_char_width_in))
     lines = max(min_lines, math.ceil(len(str(text)) / chars_per_line)) if text else min_lines
     line_height_in = (font_size_pt * line_spacing) / 72.0
     return lines * line_height_in
+
+
+def fit_font_size_to_width(text, max_width_in, max_size=28, min_size=15, bold=True):
+    """Shrink font size (like PowerPoint's own autofit) until the text is estimated to fit
+    on one line within max_width_in. Prevents large KPI numbers/words from overflowing their card.
+    Deliberately conservative (overestimates glyph width) since wide fonts like Century Gothic
+    can otherwise wrap where the estimate predicted a single line."""
+    text = str(text) if text else ""
+    if not text:
+        return max_size
+    factor = 0.74 if bold else 0.55
+    size = max_size
+    while size > min_size:
+        est_width = len(text) * (size * factor) / 72.0
+        if est_width <= max_width_in:
+            break
+        size -= 1
+    return size
+
+
+def estimate_lines_at_size(text, font_size_pt, box_width_in, bold=True):
+    text = str(text) if text else ""
+    if not text:
+        return 1
+    factor = 0.74 if bold else 0.55
+    est_width = len(text) * (font_size_pt * factor) / 72.0
+    return max(1, math.ceil(est_width / box_width_in))
 
 
 def fit_dimensions(img_w, img_h, max_w_in, max_h_in):
@@ -492,16 +519,38 @@ def build_powerpoint(deck_data, source_images=None):
             card_count = min(len(kpis), 4)
             gap = 0.35
             card_width = (CONTENT_W - (card_count - 1) * gap) / card_count
+            text_w = card_width - 0.5  # available width inside each card for text
 
-            heights = []
+            # First pass: work out a font size per card that actually fits its value text,
+            # and how many lines that value will need at that size (mirrors PowerPoint autofit).
+            card_plans = []
             for kpi in kpis[:card_count]:
-                h = 0.95  # room for value + label
+                value_text = str(kpi.get("value", ""))
+                label_text = str(kpi.get("label", ""))
+                value_font = fit_font_size_to_width(value_text, text_w, max_size=28, min_size=15, bold=True)
+                value_lines = estimate_lines_at_size(value_text, value_font, text_w, bold=True)
+                value_h = value_lines * (value_font * 1.18) / 72.0
+
+                label_font = fit_font_size_to_width(label_text, text_w, max_size=12.5, min_size=10, bold=True)
+                label_lines = estimate_lines_at_size(label_text, label_font, text_w, bold=True)
+                label_h = label_lines * (label_font * 1.25) / 72.0
+
+                desc_h = 0.0
                 if kpi.get("desc"):
-                    h += estimate_block_height_in(kpi.get("desc"), 10.5, card_width - 0.5) + 0.15
-                heights.append(min(max(h, 1.7), 3.2))
-            card_height = max(heights)
+                    desc_h = estimate_block_height_in(kpi.get("desc"), 10, text_w) + 0.12
+
+                # badge_row + value + small gap + label + desc + top/bottom padding
+                total_h = 0.62 + value_h + 0.08 + label_h + desc_h + 0.35
+                card_plans.append({
+                    "value_font": value_font, "value_lines": value_lines,
+                    "label_font": label_font, "desc_h": desc_h,
+                    "height": min(max(total_h, 1.7), 3.4)
+                })
+
+            card_height = max(p["height"] for p in card_plans)
 
             for idx, kpi in enumerate(kpis[:card_count]):
+                plan = card_plans[idx]
                 left = MARGIN + idx * (card_width + gap)
                 top = CONTENT_TOP
                 add_rounded_card(slide, left, top, card_width, card_height, card_color, primary_color, 1.0)
@@ -509,16 +558,16 @@ def build_powerpoint(deck_data, source_images=None):
                 if kpi.get("icon"):
                     add_icon_badge(slide, left + 0.22, top + 0.22, 0.42, kpi.get("icon"), primary_color, bg_color)
 
-                c_box = slide.shapes.add_textbox(Inches(left + 0.25), Inches(top + 0.72), Inches(card_width - 0.5), Inches(card_height - 0.85))
+                c_box = slide.shapes.add_textbox(Inches(left + 0.25), Inches(top + 0.72), Inches(text_w), Inches(card_height - 0.85))
                 c_tf = c_box.text_frame; c_tf.word_wrap = True
                 p_val = c_tf.paragraphs[0]
                 p_val.text = str(kpi.get("value", ""))
-                p_val.font.size = Pt(28); p_val.font.bold = True; p_val.font.name = heading_font
+                p_val.font.size = Pt(plan["value_font"]); p_val.font.bold = True; p_val.font.name = heading_font
                 p_val.font.color.rgb = primary_color
 
                 p_lbl = c_tf.add_paragraph()
                 p_lbl.text = str(kpi.get("label", ""))
-                p_lbl.font.size = Pt(12.5); p_lbl.font.bold = True; p_lbl.font.name = body_font
+                p_lbl.font.size = Pt(plan["label_font"]); p_lbl.font.bold = True; p_lbl.font.name = body_font
                 p_lbl.font.color.rgb = text_color
 
                 if kpi.get("desc"):
