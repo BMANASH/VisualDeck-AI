@@ -4,6 +4,7 @@ import io
 import json
 import math
 import time
+import requests
 from pypdf import PdfReader
 from google import genai
 from google.genai import types
@@ -338,6 +339,33 @@ def pil_to_stream(pil_img, fmt="PNG"):
     return buf
 
 
+def fetch_stock_photo(query, api_key, timeout=8):
+    """Fetch one relevant, freely-licensed photo from Pexels for a given search phrase.
+    Returns a PIL Image, or None if the key is missing, the request fails, or nothing is found —
+    callers must handle None gracefully (e.g. fall back to a non-photo layout)."""
+    if not api_key or not query:
+        return None
+    try:
+        search_resp = requests.get(
+            "https://api.pexels.com/v1/search",
+            headers={"Authorization": api_key},
+            params={"query": query, "per_page": 1, "orientation": "landscape"},
+            timeout=timeout
+        )
+        if search_resp.status_code != 200:
+            return None
+        photos = search_resp.json().get("photos", [])
+        if not photos:
+            return None
+        img_url = photos[0]["src"]["large"]
+        img_resp = requests.get(img_url, timeout=timeout)
+        if img_resp.status_code != 200:
+            return None
+        return Image.open(io.BytesIO(img_resp.content)).convert("RGB")
+    except Exception:
+        return None
+
+
 def add_rounded_card(slide, left, top, width, height, fill_rgb, line_rgb, line_w_pt=1.0):
     shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(left), Inches(top), Inches(width), Inches(height))
     shape.fill.solid()
@@ -349,7 +377,9 @@ def add_rounded_card(slide, left, top, width, height, fill_rgb, line_rgb, line_w
 
 
 def add_icon_badge(slide, left, top, size, icon_char, bg_rgb, fg_rgb):
-    """Small circular badge with an AI-chosen unicode/emoji glyph — avoids hardcoded icon mapping."""
+    """Small circular badge with an AI-chosen unicode/emoji glyph. Kept as a fallback only —
+    prefer draw_icon_badge() below, which renders native vector shapes instead of relying on
+    the viewer's machine having a matching color-emoji font installed."""
     badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(left), Inches(top), Inches(size), Inches(size))
     badge.fill.solid()
     badge.fill.fore_color.rgb = bg_rgb
@@ -363,6 +393,168 @@ def add_icon_badge(slide, left, top, size, icon_char, bg_rgb, fg_rgb):
     p.font.size = Pt(max(10, int(size * 28)))
     p.font.color.rgb = fg_rgb
     tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    return badge
+
+
+# =========================================================
+# 3b. Native Vector Icon Library (no font/emoji dependency)
+# =========================================================
+# Every icon is drawn from PowerPoint's own built-in vector shapes, so it renders identically
+# and crisply on any machine/PowerPoint/LibreOffice install — unlike emoji glyphs, which depend
+# on the viewer having a matching color-emoji font. The AI still CHOOSES which icon fits each
+# point (see ICON_LIBRARY keys used in the Gemini prompt) — only the drawing is fixed/reliable.
+
+def _style_icon_shape(shape, color_rgb, outline=False, line_w=2.2):
+    if outline:
+        shape.fill.background()
+        shape.line.color.rgb = color_rgb
+        shape.line.width = Pt(line_w)
+    else:
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = color_rgb
+        shape.line.fill.background()
+    shape.shadow.inherit = False
+
+
+def _icon_simple(preset, rotation=0):
+    def _draw(slide, cx, cy, s, color):
+        shp = slide.shapes.add_shape(preset, Inches(cx - s / 2), Inches(cy - s / 2), Inches(s), Inches(s))
+        if rotation:
+            shp.rotation = rotation
+        _style_icon_shape(shp, color)
+    return _draw
+
+
+def _icon_check(slide, cx, cy, s, color):
+    fb = slide.shapes.build_freeform(start_x=Inches(cx - s * 0.34), start_y=Inches(cy + Inches(0).inches), scale=1)
+    fb.add_line_segments([
+        (Inches(cx - s * 0.06), Inches(cy + s * 0.30)),
+        (Inches(cx + s * 0.38), Inches(cy - s * 0.32)),
+    ], close=False)
+    shape = fb.convert_to_shape()
+    shape.line.color.rgb = color
+    shape.line.width = Pt(3.2)
+    shape.fill.background()
+    shape.shadow.inherit = False
+
+
+def _icon_target(slide, cx, cy, s, color):
+    outer = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx - s / 2), Inches(cy - s / 2), Inches(s), Inches(s))
+    _style_icon_shape(outer, color, outline=True, line_w=2.2)
+    inner_s = s * 0.34
+    inner = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx - inner_s / 2), Inches(cy - inner_s / 2), Inches(inner_s), Inches(inner_s))
+    _style_icon_shape(inner, color)
+
+
+def _icon_people(slide, cx, cy, s, color):
+    r = s * 0.56
+    off = s * 0.20
+    c1 = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx - off - r / 2), Inches(cy - r / 2), Inches(r), Inches(r))
+    _style_icon_shape(c1, color)
+    c2 = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx + off - r / 2), Inches(cy - r / 2), Inches(r), Inches(r))
+    _style_icon_shape(c2, color)
+
+
+def _icon_clock(slide, cx, cy, s, color):
+    ring = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx - s / 2), Inches(cy - s / 2), Inches(s), Inches(s))
+    _style_icon_shape(ring, color, outline=True, line_w=2.4)
+    fb = slide.shapes.build_freeform(start_x=Inches(cx), start_y=Inches(cy), scale=1)
+    fb.add_line_segments([(Inches(cx), Inches(cy - s * 0.32))], close=False)
+    hand1 = fb.convert_to_shape()
+    hand1.line.color.rgb = color; hand1.line.width = Pt(2.0); hand1.shadow.inherit = False
+    fb2 = slide.shapes.build_freeform(start_x=Inches(cx), start_y=Inches(cy), scale=1)
+    fb2.add_line_segments([(Inches(cx + s * 0.22), Inches(cy))], close=False)
+    hand2 = fb2.convert_to_shape()
+    hand2.line.color.rgb = color; hand2.line.width = Pt(2.0); hand2.shadow.inherit = False
+
+
+def _icon_calendar(slide, cx, cy, s, color):
+    body = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(cx - s / 2), Inches(cy - s * 0.42), Inches(s), Inches(s * 0.84))
+    _style_icon_shape(body, color, outline=True, line_w=2.0)
+    header = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(cx - s / 2), Inches(cy - s * 0.42), Inches(s), Inches(s * 0.24))
+    _style_icon_shape(header, color)
+
+
+def _icon_dollar(slide, cx, cy, s, color):
+    shp = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx - s / 2), Inches(cy - s / 2), Inches(s), Inches(s))
+    _style_icon_shape(shp, color, outline=True, line_w=2.2)
+    tf = shp.text_frame
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    p = tf.paragraphs[0]
+    p.alignment = PP_ALIGN.CENTER
+    p.text = "$"
+    p.font.size = Pt(max(9, int(s * 34)))
+    p.font.bold = True
+    p.font.color.rgb = color
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+
+
+ICON_DRAW_FUNCS = {
+    "check": _icon_check,
+    "bolt": _icon_simple(MSO_SHAPE.LIGHTNING_BOLT),
+    "shield": _icon_simple(MSO_SHAPE.REGULAR_PENTAGON, rotation=180),
+    "gear": _icon_simple(MSO_SHAPE.GEAR_6),
+    "chart_up": _icon_simple(MSO_SHAPE.UP_ARROW),
+    "chart_down": _icon_simple(MSO_SHAPE.DOWN_ARROW),
+    "dollar": _icon_dollar,
+    "box": _icon_simple(MSO_SHAPE.CUBE),
+    "star": _icon_simple(MSO_SHAPE.STAR_5_POINT),
+    "warning": _icon_simple(MSO_SHAPE.ISOSCELES_TRIANGLE),
+    "document": _icon_simple(MSO_SHAPE.FLOWCHART_DOCUMENT),
+    "target": _icon_target,
+    "people": _icon_people,
+    "heart": _icon_simple(MSO_SHAPE.HEART),
+    "clock": _icon_clock,
+    "calendar": _icon_calendar,
+    "tools": _icon_simple(MSO_SHAPE.GEAR_9),
+    "globe": _icon_simple(MSO_SHAPE.SUN),
+    "flag": _icon_simple(MSO_SHAPE.RIGHT_TRIANGLE),
+    "truck": _icon_simple(MSO_SHAPE.NOTCHED_RIGHT_ARROW),
+    "drop": _icon_simple(MSO_SHAPE.TEAR, rotation=180),
+}
+
+# Human-readable labels used ONLY in the Streamlit edit UI (dropdowns) — never sent into the pptx.
+ICON_LIBRARY_UI = {
+    "check": "✅ Check — approval / compliance",
+    "bolt": "⚡ Bolt — speed / power / flow rate",
+    "shield": "🛡️ Shield — safety / protection",
+    "gear": "⚙️ Gear — mechanism / operations",
+    "chart_up": "📈 Arrow Up — growth / increase",
+    "chart_down": "📉 Arrow Down — reduction / decrease",
+    "dollar": "💲 Dollar — price / investment",
+    "box": "📦 Box — product / package / capacity",
+    "star": "⭐ Star — highlight / key benefit",
+    "warning": "⚠️ Warning — caution / risk",
+    "document": "📄 Document — paperwork / certification",
+    "target": "🎯 Target — precision / accuracy",
+    "people": "👥 People — team / partners / customers",
+    "heart": "❤️ Heart — care / trust / satisfaction",
+    "clock": "🕒 Clock — time / speed / duration",
+    "calendar": "📅 Calendar — schedule / timeline",
+    "tools": "🛠️ Tools — maintenance / support",
+    "globe": "🌐 Globe — reach / network / energy",
+    "flag": "🚩 Flag — milestone / goal",
+    "truck": "🚚 Truck — delivery / logistics",
+    "drop": "💧 Drop — fuel / liquid",
+}
+
+
+def draw_icon_badge(slide, left, top, size, icon_key, bg_rgb, fg_rgb):
+    """Circular badge with a native vector icon inside — the professional, font-independent
+    replacement for emoji glyphs. Falls back to a star if the AI returns an unrecognized key."""
+    badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(left), Inches(top), Inches(size), Inches(size))
+    badge.fill.solid()
+    badge.fill.fore_color.rgb = bg_rgb
+    badge.line.fill.background()
+    badge.shadow.inherit = False
+    cx = left + size / 2
+    cy = top + size / 2
+    inner = size * 0.5
+    draw_fn = ICON_DRAW_FUNCS.get(str(icon_key).strip().lower() if icon_key else "", ICON_DRAW_FUNCS["star"])
+    try:
+        draw_fn(slide, cx, cy, inner, fg_rgb)
+    except Exception:
+        ICON_DRAW_FUNCS["star"](slide, cx, cy, inner, fg_rgb)
     return badge
 
 
@@ -471,10 +663,10 @@ def build_powerpoint(deck_data, source_images=None):
             text_w = CONTENT_W - img_box_w - 0.5
             cursor_top = CONTENT_TOP
             for bullet in slide_info.get("bullets", [])[:6]:
-                icon = bullet.get("icon", "•") if isinstance(bullet, dict) else "•"
+                icon = bullet.get("icon", "star") if isinstance(bullet, dict) else "star"
                 b_text = bullet.get("text", str(bullet)) if isinstance(bullet, dict) else str(bullet)
                 b_height = max(0.55, estimate_block_height_in(b_text, 13, text_w - 0.5) + 0.18)
-                add_icon_badge(slide, text_left, cursor_top + 0.05, 0.32, icon, primary_color, bg_color)
+                draw_icon_badge(slide, text_left, cursor_top + 0.05, 0.32, icon, primary_color, bg_color)
                 b_box = slide.shapes.add_textbox(Inches(text_left + 0.48), Inches(cursor_top), Inches(text_w - 0.48), Inches(b_height))
                 btf = b_box.text_frame; btf.word_wrap = True
                 bp = btf.paragraphs[0]
@@ -555,8 +747,7 @@ def build_powerpoint(deck_data, source_images=None):
                 top = CONTENT_TOP
                 add_rounded_card(slide, left, top, card_width, card_height, card_color, primary_color, 1.0)
 
-                if kpi.get("icon"):
-                    add_icon_badge(slide, left + 0.22, top + 0.22, 0.42, kpi.get("icon"), primary_color, bg_color)
+                add_icon_badge_ref = draw_icon_badge(slide, left + 0.22, top + 0.22, 0.42, kpi.get("icon", "star"), primary_color, bg_color)
 
                 c_box = slide.shapes.add_textbox(Inches(left + 0.25), Inches(top + 0.72), Inches(text_w), Inches(card_height - 0.85))
                 c_tf = c_box.text_frame; c_tf.word_wrap = True
@@ -622,7 +813,7 @@ def build_powerpoint(deck_data, source_images=None):
                 items = []
                 for bullet in bullets[:card_count]:
                     b_text = bullet.get("text", str(bullet)) if isinstance(bullet, dict) else str(bullet)
-                    icon = bullet.get("icon", "•") if isinstance(bullet, dict) else "•"
+                    icon = bullet.get("icon", "star") if isinstance(bullet, dict) else "star"
                     h = estimate_block_height_in(b_text, 13, CONTENT_W - 1.0) + 0.34
                     items.append((b_text, icon, max(h, 0.62)))
 
@@ -634,7 +825,7 @@ def build_powerpoint(deck_data, source_images=None):
                 for b_text, icon, h in items:
                     h_scaled = h * scale
                     add_rounded_card(slide, MARGIN, cursor_top, CONTENT_W, h_scaled, card_color, primary_color, 1.0)
-                    add_icon_badge(slide, MARGIN + 0.22, cursor_top + h_scaled / 2 - 0.16, 0.32, icon, primary_color, bg_color)
+                    draw_icon_badge(slide, MARGIN + 0.22, cursor_top + h_scaled / 2 - 0.16, 0.32, icon, primary_color, bg_color)
                     b_box = slide.shapes.add_textbox(Inches(MARGIN + 0.7), Inches(cursor_top), Inches(CONTENT_W - 1.0), Inches(h_scaled))
                     b_tf = b_box.text_frame; b_tf.word_wrap = True
                     b_tf.vertical_anchor = MSO_ANCHOR.MIDDLE
@@ -791,6 +982,8 @@ if uploaded_files:
     # =========================================================
     # 11. Presentation Customization Console
     # =========================================================
+    pexels_key = st.secrets.get("PEXELS_API_KEY")
+
     st.markdown("### ⚙️ Presentation Customization")
     with st.container(border=True):
         opt_col1, opt_col2, opt_col3 = st.columns(3)
@@ -810,6 +1003,21 @@ if uploaded_files:
                 "Let the AI choose the palette based on:",
                 ["Auto-Detect From Uploaded Visuals", "Bold & Futuristic", "Elegant & Minimal", "Corporate & Trustworthy", "Warm & Approachable"],
                 index=0
+            )
+
+        st.markdown("**🌐 Step 4: Stock Photography (optional)**")
+        if pexels_key:
+            use_stock_photos = st.checkbox(
+                "Let the AI pull free stock photos (via Pexels) for slides that would benefit from a "
+                "supporting image but don't have a matching uploaded photo.",
+                value=False
+            )
+        else:
+            use_stock_photos = False
+            st.caption(
+                "🔒 Disabled — add a free `PEXELS_API_KEY` to your Streamlit Secrets to let the AI source "
+                "relevant stock photos automatically for slides your own uploads don't cover. "
+                "Get a free key at pexels.com/api. Your own uploaded product photos are always used first."
             )
 
     generate_clicked = st.button("⚡ Generate AI Presentation Deck", type="primary")
@@ -833,6 +1041,18 @@ if uploaded_files:
                 else f"Lean toward a '{style_hint}' visual direction while still grounding choices in what you see in the uploaded visuals."
             )
 
+            stock_instruction = (
+                """8. STOCK PHOTOS: If a slide would clearly benefit from a supporting photo but none of the
+               uploaded images fit it, you MAY set "image_source" to "stock" instead of "uploaded", and provide
+               a "stock_photo_query" — a short 2-4 word natural-language search phrase (e.g. "industrial fuel
+               warehouse", "delivery truck highway") describing the photo needed. Only do this for image_left,
+               image_right, or image_full layouts. Prefer your own uploaded images whenever one genuinely fits."""
+                if use_stock_photos else
+                """8. STOCK PHOTOS: Not enabled for this generation — only use "image_index" with the uploaded
+               images provided; do not request stock photos."""
+            )
+
+
             prompt = f"""
             You are an award-winning presentation designer and brand strategist. Analyze the uploaded source
             images carefully — their subject matter, mood, existing colors/logos, and level of formality.
@@ -850,8 +1070,12 @@ if uploaded_files:
                this exact list (PowerPoint-safe fonts): Calibri, Arial, Segoe UI, Georgia, Verdana, Trebuchet MS,
                Century Gothic, Garamond, Tahoma — pick a pairing that matches the mood (e.g. Georgia for elegant,
                Century Gothic for modern/tech, Calibri for corporate).
-            4. ICONS: For every KPI and bullet, choose ONE short unicode symbol or emoji in the "icon" field that
-               best represents that specific point (not a generic bullet) — pick freely based on meaning.
+            4. ICONS: For every KPI and bullet, choose ONE icon KEY from this exact fixed vocabulary — pick
+               whichever key best matches that specific point's meaning (never invent a new key, never use an
+               emoji character directly): check, bolt, shield, gear, chart_up, chart_down, dollar, box, star,
+               warning, document, target, people, heart, clock, calendar, tools, globe, flag, truck, drop.
+               These are rendered as clean native vector icons, so pick based on meaning (e.g. "dollar" for
+               pricing, "shield" for safety/compliance, "truck" for delivery/logistics, "bolt" for speed/power).
             5. IMAGES: You are given {len(raw_image_parts)} source image(s), indexed 0 to {len(raw_image_parts) - 1}
                in the order provided. For any slide where showing one of these images would help
                (e.g. showcasing a specific product), set "layout_type" to "image_left", "image_right", or
@@ -862,7 +1086,9 @@ if uploaded_files:
             6. LAYOUT VARIETY: Do not repeat the same layout_type on every slide unless the content truly calls
                for it. Choose whichever of: kpi_grid, table, cards, image_left, image_right, image_full,
                section_break best fits each slide's specific content.
-            7. BULLETS FORMAT: Every bullet must be an object: {{"icon": "🔧", "text": "..."}} — never a bare string.
+            7. BULLETS FORMAT: Every bullet must be an object: {{"icon": "check", "text": "..."}} — the icon
+               value must be one of the exact keys listed in point 4. Never a bare string, never an emoji.
+            {stock_instruction}
 
             Output ONLY a JSON object conforming strictly to this structure (no markdown fences, no commentary):
             {{
@@ -884,7 +1110,7 @@ if uploaded_files:
                   "title": "Slide Title",
                   "subtitle": "Subtitle or core insight",
                   "kpis": [
-                    {{"label": "Metric Name", "value": "Extracted Value", "desc": "Context note", "icon": "⚙️"}}
+                    {{"label": "Metric Name", "value": "Extracted Value", "desc": "Context note", "icon": "gear"}}
                   ]
                 }},
                 {{
@@ -892,9 +1118,10 @@ if uploaded_files:
                   "layout_type": "image_left",
                   "title": "Slide Title",
                   "subtitle": "Subtitle",
+                  "image_source": "uploaded",
                   "image_index": 0,
                   "bullets": [
-                    {{"icon": "✅", "text": "Point about the product shown"}}
+                    {{"icon": "check", "text": "Point about the product shown"}}
                   ]
                 }},
                 {{
@@ -913,7 +1140,7 @@ if uploaded_files:
                   "title": "Key Advantages & Features",
                   "subtitle": "Value summary",
                   "bullets": [
-                    {{"icon": "🛡️", "text": "Clear bullet point 1"}}
+                    {{"icon": "shield", "text": "Clear bullet point 1"}}
                   ]
                 }}
               ]
@@ -951,11 +1178,29 @@ if uploaded_files:
                 loader_placeholder.empty()
                 st.error(f"API Error Log: {last_error}")
             else:
-                render_loader(loader_placeholder, "Synthesizing your deck", "PHASE 2 · Building native slides, images & tables...")
-                pptx_stream = build_powerpoint(response_json, source_images)
+                render_loader(loader_placeholder, "Synthesizing your deck", "PHASE 2 · Sourcing photos & building slides...")
+
+                # Resolve any AI-requested stock photos into the image list (only if the user enabled it
+                # and a Pexels key is configured). Falls back to a non-photo layout if a fetch fails,
+                # so a network hiccup never produces a broken/blank slide.
+                working_images = list(source_images)
+                if use_stock_photos and pexels_key:
+                    for slide_info in response_json.get("slides", []):
+                        if slide_info.get("image_source") == "stock" and slide_info.get("stock_photo_query"):
+                            stock_img = fetch_stock_photo(slide_info["stock_photo_query"], pexels_key)
+                            if stock_img is not None:
+                                working_images.append(stock_img)
+                                slide_info["image_index"] = len(working_images) - 1
+                            else:
+                                # Couldn't fetch a photo — don't leave a broken image slide, fall back to cards.
+                                slide_info["layout_type"] = "cards"
+                                if not slide_info.get("bullets"):
+                                    slide_info["bullets"] = [{"icon": "star", "text": slide_info.get("subtitle", slide_info.get("title", ""))}]
+
+                pptx_stream = build_powerpoint(response_json, working_images)
                 st.session_state["generated_pptx"] = pptx_stream
                 st.session_state["deck_data"] = response_json
-                st.session_state["source_images"] = source_images
+                st.session_state["source_images"] = working_images
                 time.sleep(0.4)
                 loader_placeholder.empty()
                 st.success("✅ Presentation deck synthesized successfully!")
@@ -980,9 +1225,33 @@ if uploaded_files:
         )
 
         st.markdown("#### ✏️ Interactive Slide Preview & Editor")
-        st.caption("Review your generated slides below. Switch layouts, swap images, or edit text/tables before downloading.")
+
+        with st.container(border=True):
+            st.markdown("**💡 How editing works**")
+            st.markdown(
+                "- Each slide below shows a **live preview** of exactly what will be in your PPTX.\n"
+                "- Click **\"✏️ Edit This Slide\"** underneath any slide to change its title, text, icons, "
+                "table data, layout, or photo.\n"
+                "- Icons are picked from a dropdown — no need to type any symbols.\n"
+                "- When you're happy with your changes, click **\"💾 Apply Edits & Rebuild\"** at the very "
+                "bottom, then use the **Download** button above to get the updated file."
+            )
 
         LAYOUT_OPTIONS = ["kpi_grid", "table", "cards", "image_left", "image_right", "image_full", "section_break"]
+        LAYOUT_LABELS = {
+            "kpi_grid": "🔢 KPI Grid — up to 4 metric cards",
+            "table": "📊 Table — rows & columns of data",
+            "cards": "📋 Stacked Cards — a list of points",
+            "image_left": "🖼️ Photo Left + Points Right",
+            "image_right": "🖼️ Points Left + Photo Right",
+            "image_full": "🖼️ Full-Width Photo",
+            "section_break": "➖ Section Divider — title-only slide",
+        }
+        ICON_KEYS = list(ICON_LIBRARY_UI.keys())
+
+        def icon_emoji(icon_key):
+            label = ICON_LIBRARY_UI.get(icon_key, ICON_LIBRARY_UI["star"])
+            return label.split(" ", 1)[0]
 
         for idx, s in enumerate(slides):
             with st.container(border=True):
@@ -1002,7 +1271,7 @@ if uploaded_files:
                         kpi_cols = st.columns(len(s["kpis"]))
                         for k_idx, k in enumerate(s["kpis"]):
                             with kpi_cols[k_idx]:
-                                st.metric(label=f"{k.get('icon', '')} {k.get('label', 'Metric')}", value=k.get("value", "N/A"))
+                                st.metric(label=f"{icon_emoji(k.get('icon', 'star'))} {k.get('label', 'Metric')}", value=k.get("value", "N/A"))
 
                     elif s.get("layout_type") == "table" and s.get("table"):
                         headers = s["table"].get("headers", [])
@@ -1014,63 +1283,100 @@ if uploaded_files:
                     elif s.get("bullets"):
                         for b in s["bullets"]:
                             if isinstance(b, dict):
-                                st.markdown(f"{b.get('icon', '•')} {b.get('text', '')}")
+                                st.markdown(f"{icon_emoji(b.get('icon', 'star'))} {b.get('text', '')}")
                             else:
                                 st.markdown(f"• {b}")
 
                 # ---- Easier, tabbed editing controls ----
-                with st.expander(f"✏️ Edit Slide {idx + 1}"):
-                    tab_content, tab_layout = st.tabs(["📝 Content", "🎛️ Layout & Image"])
+                with st.expander("✏️ Edit This Slide"):
+                    tab_content, tab_layout = st.tabs(["📝 Text & Icons", "🎛️ Layout & Photo"])
 
                     with tab_content:
                         s["title"] = st.text_input("Slide Title:", value=s.get("title", ""), key=f"title_{idx}")
                         s["subtitle"] = st.text_input("Subtitle / Insight:", value=s.get("subtitle", ""), key=f"sub_{idx}")
 
                         if s.get("layout_type") == "table" and s.get("table"):
-                            st.markdown("**Edit Table Data:**")
+                            st.markdown("**Table data** — double-click a cell to edit, use the row menu to add/remove rows:")
                             headers = s["table"].get("headers", [])
                             rows = s["table"].get("rows", [])
                             if headers and rows:
                                 df_edit = pd.DataFrame(rows, columns=headers)
-                                edited_df = st.data_editor(df_edit, key=f"tbl_edit_{idx}", num_rows="dynamic")
+                                edited_df = st.data_editor(df_edit, key=f"tbl_edit_{idx}", num_rows="dynamic", use_container_width=True)
                                 s["table"]["headers"] = list(edited_df.columns)
                                 s["table"]["rows"] = edited_df.values.tolist()
 
-                        elif s.get("layout_type") in ("cards", "image_left", "image_right") and s.get("bullets"):
-                            st.markdown("**Edit Points (one per line — optionally start with an emoji icon):**")
-                            bullet_lines = []
-                            for b in s.get("bullets", []):
-                                if isinstance(b, dict):
-                                    bullet_lines.append(f"{b.get('icon', '')} {b.get('text', '')}".strip())
-                                else:
-                                    bullet_lines.append(str(b))
-                            edited_text = st.text_area("Points:", value="\n".join(bullet_lines), key=f"bullets_{idx}", height=120)
-                            new_bullets = []
-                            for line in edited_text.split("\n"):
-                                line = line.strip()
-                                if not line:
-                                    continue
-                                parts = line.split(" ", 1)
-                                if len(parts) == 2 and len(parts[0]) <= 4:
-                                    new_bullets.append({"icon": parts[0], "text": parts[1]})
-                                else:
-                                    new_bullets.append({"icon": "•", "text": line})
-                            s["bullets"] = new_bullets
+                        elif s.get("layout_type") in ("cards", "image_left", "image_right"):
+                            st.markdown("**Points** — pick an icon and edit the text for each one:")
+                            bullets = s.get("bullets", [])
+                            remove_idx = None
+                            for b_idx, b in enumerate(bullets):
+                                if not isinstance(b, dict):
+                                    b = {"icon": "star", "text": str(b)}
+                                    bullets[b_idx] = b
+                                row_icon, row_text, row_remove = st.columns([2, 5, 1])
+                                current_icon = b.get("icon", "star")
+                                if current_icon not in ICON_KEYS:
+                                    current_icon = "star"
+                                chosen_icon = row_icon.selectbox(
+                                    "Icon", ICON_KEYS, index=ICON_KEYS.index(current_icon),
+                                    format_func=lambda k: ICON_LIBRARY_UI[k],
+                                    key=f"bicon_{idx}_{b_idx}", label_visibility="collapsed"
+                                )
+                                b["icon"] = chosen_icon
+                                b["text"] = row_text.text_input(
+                                    "Text", value=b.get("text", ""), key=f"btext_{idx}_{b_idx}", label_visibility="collapsed"
+                                )
+                                if row_remove.button("🗑️", key=f"bdel_{idx}_{b_idx}", help="Remove this point"):
+                                    remove_idx = b_idx
 
-                        elif s.get("layout_type") == "kpi_grid" and s.get("kpis"):
-                            st.markdown("**Edit KPI Cards:**")
-                            for k_idx, k in enumerate(s["kpis"]):
-                                kcols = st.columns([1, 2, 2, 3])
-                                k["icon"] = kcols[0].text_input("Icon", value=k.get("icon", ""), key=f"kpi_icon_{idx}_{k_idx}")
-                                k["label"] = kcols[1].text_input("Label", value=k.get("label", ""), key=f"kpi_lbl_{idx}_{k_idx}")
-                                k["value"] = kcols[2].text_input("Value", value=str(k.get("value", "")), key=f"kpi_val_{idx}_{k_idx}")
-                                k["desc"] = kcols[3].text_input("Description", value=k.get("desc", ""), key=f"kpi_desc_{idx}_{k_idx}")
+                            if remove_idx is not None:
+                                bullets.pop(remove_idx)
+                                s["bullets"] = bullets
+                                st.rerun()
+
+                            if len(bullets) < 8 and st.button("➕ Add a point", key=f"badd_{idx}"):
+                                bullets.append({"icon": "star", "text": "New point"})
+                                s["bullets"] = bullets
+                                st.rerun()
+
+                        elif s.get("layout_type") == "kpi_grid":
+                            st.markdown("**KPI cards** — up to 4, each with an icon, label, value, and short description:")
+                            kpis = s.get("kpis", [])
+                            remove_idx = None
+                            for k_idx, k in enumerate(kpis):
+                                st.markdown(f"—  **Card {k_idx + 1}**")
+                                kcols = st.columns([2, 2, 2, 3, 1])
+                                current_icon = k.get("icon", "star")
+                                if current_icon not in ICON_KEYS:
+                                    current_icon = "star"
+                                k["icon"] = kcols[0].selectbox(
+                                    "Icon", ICON_KEYS, index=ICON_KEYS.index(current_icon),
+                                    format_func=lambda key: ICON_LIBRARY_UI[key],
+                                    key=f"kpi_icon_{idx}_{k_idx}", label_visibility="collapsed"
+                                )
+                                k["label"] = kcols[1].text_input("Label", value=k.get("label", ""), key=f"kpi_lbl_{idx}_{k_idx}", label_visibility="collapsed", placeholder="Label")
+                                k["value"] = kcols[2].text_input("Value", value=str(k.get("value", "")), key=f"kpi_val_{idx}_{k_idx}", label_visibility="collapsed", placeholder="Value")
+                                k["desc"] = kcols[3].text_input("Description", value=k.get("desc", ""), key=f"kpi_desc_{idx}_{k_idx}", label_visibility="collapsed", placeholder="Short description")
+                                if kcols[4].button("🗑️", key=f"kdel_{idx}_{k_idx}", help="Remove this card"):
+                                    remove_idx = k_idx
+
+                            if remove_idx is not None:
+                                kpis.pop(remove_idx)
+                                s["kpis"] = kpis
+                                st.rerun()
+
+                            if len(kpis) < 4 and st.button("➕ Add a KPI card", key=f"kadd_{idx}"):
+                                kpis.append({"icon": "star", "label": "New Metric", "value": "—", "desc": ""})
+                                s["kpis"] = kpis
+                                st.rerun()
 
                     with tab_layout:
+                        st.caption("Change how this slide is structured, or swap which photo it uses.")
                         current_layout = s.get("layout_type", "cards")
                         new_layout = st.selectbox(
                             "Slide layout:", LAYOUT_OPTIONS,
                             index=LAYOUT_OPTIONS.index(current_layout) if current_layout in LAYOUT_OPTIONS else 0,
+                            format_func=lambda k: LAYOUT_LABELS.get(k, k),
                             key=f"layout_{idx}"
                         )
                         s["layout_type"] = new_layout
@@ -1079,9 +1385,11 @@ if uploaded_files:
                             img_labels = [f"Image {i}" for i in range(len(src_imgs))]
                             current_idx = s.get("image_index", 0) if isinstance(s.get("image_index"), int) else 0
                             current_idx = current_idx if 0 <= current_idx < len(src_imgs) else 0
-                            chosen = st.selectbox("Image to use:", img_labels, index=current_idx, key=f"img_pick_{idx}")
+                            chosen = st.selectbox("Photo to use on this slide:", img_labels, index=current_idx, key=f"img_pick_{idx}")
                             s["image_index"] = img_labels.index(chosen)
                             st.image(src_imgs[s["image_index"]], width=220)
+                        elif new_layout in ("image_left", "image_right", "image_full") and not src_imgs:
+                            st.info("No uploaded photos are available to place on this slide.")
 
         if st.button("💾 Apply Edits & Rebuild Presentation", type="secondary"):
             st.session_state["generated_pptx"] = build_powerpoint(st.session_state["deck_data"], src_imgs)
