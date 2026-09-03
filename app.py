@@ -1043,13 +1043,33 @@ if uploaded_files:
 
             stock_instruction = (
                 """8. STOCK PHOTOS: If a slide would clearly benefit from a supporting photo but none of the
-               uploaded images fit it, you MAY set "image_source" to "stock" instead of "uploaded", and provide
-               a "stock_photo_query" — a short 2-4 word natural-language search phrase (e.g. "industrial fuel
-               warehouse", "delivery truck highway") describing the photo needed. Only do this for image_left,
-               image_right, or image_full layouts. Prefer your own uploaded images whenever one genuinely fits."""
+               uploaded images fit it, set "image_source" to "stock" instead of "uploaded", and provide a
+               "stock_photo_query" — a short 2-4 word natural-language search phrase (e.g. "industrial fuel
+               warehouse", "delivery truck highway") describing the real-world photo needed. Only do this for
+               image_left, image_right, or image_full layouts. Prefer your own uploaded images whenever one
+               genuinely fits — but a closing/impact slide is a good candidate for a stock photo if no uploaded
+               image suits it, since a purely text-only closing slide is visually weaker. See the stock-photo
+               example slide in the schema below for the exact field format."""
                 if use_stock_photos else
                 """8. STOCK PHOTOS: Not enabled for this generation — only use "image_index" with the uploaded
-               images provided; do not request stock photos."""
+               images provided; do not request stock photos, and do not include "image_source" or
+               "stock_photo_query" fields at all."""
+            )
+
+            stock_example_slide = (
+                """,
+                {
+                  "slide_number": 5,
+                  "layout_type": "image_full",
+                  "title": "Building the Future of Energy",
+                  "subtitle": "Join our network of industry-leading partners",
+                  "image_source": "stock",
+                  "stock_photo_query": "fuel truck highway delivery",
+                  "bullets": [
+                    {"icon": "flag", "text": "Nationwide delivery network"}
+                  ]
+                }"""
+                if use_stock_photos else ""
             )
 
 
@@ -1142,7 +1162,7 @@ if uploaded_files:
                   "bullets": [
                     {{"icon": "shield", "text": "Clear bullet point 1"}}
                   ]
-                }}
+                }}{stock_example_slide}
               ]
             }}
             """
